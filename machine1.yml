@@ -1,0 +1,289 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# PLAYBOOK AUTONOME — Machine1 (Debian/Ubuntu)
+# Rôle : Hôte avec bond LACP dual-homed vers SW1 (swp3) et SW2 (swp3)
+# Usage : ansible-playbook -i "IP_M1," machine1.yml -u debian -k --become
+# ═══════════════════════════════════════════════════════════════════════════
+---
+- name: Configuration complète Machine1
+  hosts: all
+  gather_facts: true
+  become: true
+
+  vars:
+
+    # ── Identité système ──────────────────────────────────────────────────
+    hostname: machine1
+
+    # ── Bond LACP ─────────────────────────────────────────────────────────
+    bond:
+      name: bond0
+      ip: "192.168.1.1/24"
+      gateway: "192.168.1.254"       # SVI VLAN10 sur SW3
+      members:
+        - eth0                       # vers SW1 swp3
+        - eth1                       # vers SW2 swp3
+      mode: "802.3ad"
+      miimon: 100
+      lacp_rate: fast
+      min_links: 1
+      xmit_hash_policy: "layer3+4"
+
+    # ── Routes statiques ──────────────────────────────────────────────────
+    static_routes:
+      - prefix: "192.168.2.0/24"
+        gateway: "192.168.1.254"
+        description: "Réseau Machine2 via SW3"
+      - prefix: "10.10.10.0/24"
+        gateway: "192.168.1.254"
+        description: "Loopbacks switches via SW3"
+
+    # ── Paquets requis ────────────────────────────────────────────────────
+    required_packages:
+      - ifenslave
+      - ethtool
+      - net-tools
+      - iproute2
+      - tcpdump
+      - traceroute
+
+    # ── Modules kernel ────────────────────────────────────────────────────
+    kernel_modules:
+      - bonding
+
+    # ── Sysctl ────────────────────────────────────────────────────────────
+    sysctl_settings:
+      - name: net.ipv4.ip_forward
+        value: "0"                   # Machine1 n'est pas un routeur
+      - name: net.core.rmem_max
+        value: "134217728"
+      - name: net.core.wmem_max
+        value: "134217728"
+
+  tasks:
+
+    # ════════════════════════════════════════════════════════════════════
+    # 1. PARAMÈTRES SYSTÈME
+    # ════════════════════════════════════════════════════════════════════
+
+    - name: "[SYS] Définir le hostname"
+      hostname:
+        name: "{{ hostname }}"
+
+    - name: "[SYS] Mettre à jour /etc/hosts"
+      lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.1\.1'
+        line: "127.0.1.1 {{ hostname }}"
+        state: present
+
+    - name: "[SYS] Mettre à jour les paquets et installer les dépendances"
+      apt:
+        name: "{{ required_packages }}"
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: "[SYS] Charger les modules kernel"
+      modprobe:
+        name: "{{ item }}"
+        state: present
+      loop: "{{ kernel_modules }}"
+
+    - name: "[SYS] Rendre les modules persistants au démarrage"
+      lineinfile:
+        path: /etc/modules
+        line: "{{ item }}"
+        state: present
+      loop: "{{ kernel_modules }}"
+
+    - name: "[SYS] Appliquer les paramètres sysctl"
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: true
+        sysctl_file: /etc/sysctl.d/99-campus.conf
+      loop: "{{ sysctl_settings }}"
+
+    # ════════════════════════════════════════════════════════════════════
+    # 2. INTERFACES RÉSEAU — BOND LACP
+    # ════════════════════════════════════════════════════════════════════
+
+    - name: "[NET] Sauvegarder l'ancien fichier interfaces"
+      copy:
+        src: /etc/network/interfaces
+        dest: "/etc/network/interfaces.bak.{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+        remote_src: true
+      ignore_errors: true
+
+    - name: "[NET] Descendre les interfaces membres avant reconfiguration"
+      command: "ip link set {{ item }} down"
+      loop: "{{ bond.members }}"
+      ignore_errors: true
+      changed_when: true
+
+    - name: "[NET] Supprimer le bond existant si présent"
+      command: "ip link delete {{ bond.name }}"
+      ignore_errors: true
+      changed_when: true
+
+    - name: "[NET] Déployer /etc/network/interfaces"
+      copy:
+        dest: /etc/network/interfaces
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          # /etc/network/interfaces — {{ hostname }}
+          # Généré par Ansible — {{ lookup('pipe', 'date') }}
+          # Bond LACP 802.3ad dual-homed → SW1 (swp3) + SW2 (swp3)
+
+          auto lo
+          iface lo inet loopback
+
+          # ── Membres du bond ──────────────────────────────────────────
+          {% for member in bond.members %}
+          # {{ member }} → SW{{ loop.index }} swp3
+          auto {{ member }}
+          iface {{ member }} inet manual
+              bond-master {{ bond.name }}
+
+          {% endfor %}
+          # ── Bond LACP 802.3ad ────────────────────────────────────────
+          auto {{ bond.name }}
+          iface {{ bond.name }} inet static
+              address {{ bond.ip }}
+              gateway {{ bond.gateway }}
+              bond-slaves {{ bond.members | join(' ') }}
+              bond-mode {{ bond.mode }}
+              bond-miimon {{ bond.miimon }}
+              bond-lacp-rate {{ bond.lacp_rate }}
+              bond-min-links {{ bond.min_links }}
+              bond-xmit-hash-policy {{ bond.xmit_hash_policy }}
+              # Routes statiques post-up
+              {% for route in static_routes %}
+              post-up ip route add {{ route.prefix }} via {{ bond.gateway }} dev {{ bond.name }} || true
+              {% endfor %}
+
+    - name: "[NET] Redémarrer le service networking"
+      service:
+        name: networking
+        state: restarted
+      ignore_errors: true
+
+    - name: "[NET] Attendre que le bond soit établi (10s)"
+      wait_for:
+        timeout: 10
+      delegate_to: localhost
+
+    # ════════════════════════════════════════════════════════════════════
+    # 3. ROUTES STATIQUES
+    # ════════════════════════════════════════════════════════════════════
+
+    - name: "[ROUTE] Appliquer les routes statiques dans le kernel"
+      command: "ip route replace {{ item.prefix }} via {{ bond.gateway }} dev {{ bond.name }}"
+      loop: "{{ static_routes }}"
+      ignore_errors: true
+      changed_when: true
+
+    - name: "[ROUTE] Vérifier la table de routage"
+      command: ip route show
+      register: route_table
+      changed_when: false
+
+    - name: "[ROUTE] Afficher les routes"
+      debug:
+        msg: "{{ route_table.stdout_lines }}"
+
+    - name: "[ROUTE] Confirmer route par défaut présente"
+      assert:
+        that: "'default via 192.168.1.254' in route_table.stdout"
+        fail_msg: "ERREUR : route par défaut via 192.168.1.254 absente"
+        success_msg: "OK : route par défaut via SW3 présente ✓"
+
+    # ════════════════════════════════════════════════════════════════════
+    # 4. VÉRIFICATION DU BOND
+    # ════════════════════════════════════════════════════════════════════
+
+    - name: "[BOND] Vérifier l'état du bond0"
+      command: "cat /proc/net/bonding/{{ bond.name }}"
+      register: bond_status
+      changed_when: false
+
+    - name: "[BOND] Afficher l'état du bond"
+      debug:
+        msg: "{{ bond_status.stdout_lines }}"
+
+    - name: "[BOND] Confirmer mode 802.3ad"
+      assert:
+        that: "'802.3ad' in bond_status.stdout"
+        fail_msg: "ERREUR : bond0 n'est pas en mode 802.3ad"
+        success_msg: "OK : bond0 en mode 802.3ad ✓"
+
+    - name: "[BOND] Compter les membres UP"
+      set_fact:
+        members_up: "{{ bond_status.stdout | regex_findall('MII Status: up') | length }}"
+
+    - name: "[BOND] Afficher le nombre de membres UP"
+      debug:
+        msg: "Membres UP : {{ members_up }} / {{ bond.members | length }}"
+
+    - name: "[BOND] Confirmer l'adresse IP du bond"
+      command: "ip addr show {{ bond.name }}"
+      register: bond_ip
+      changed_when: false
+
+    - name: "[BOND] Afficher l'IP"
+      debug:
+        msg: "{{ bond_ip.stdout_lines }}"
+
+    - name: "[BOND] Confirmer IP 192.168.1.1 présente"
+      assert:
+        that: "'192.168.1.1' in bond_ip.stdout"
+        fail_msg: "ERREUR : IP 192.168.1.1 absente de bond0"
+        success_msg: "OK : IP 192.168.1.1 sur bond0 ✓"
+
+    # ════════════════════════════════════════════════════════════════════
+    # 5. TESTS DE CONNECTIVITÉ
+    # ════════════════════════════════════════════════════════════════════
+
+    - name: "[PING] Ping vers la passerelle SW3 (192.168.1.254)"
+      command: ping -c 3 -W 2 192.168.1.254
+      register: ping_gw
+      changed_when: false
+      ignore_errors: true
+
+    - name: "[PING] Résultat ping passerelle"
+      debug:
+        msg: "{{ ping_gw.stdout_lines[-3:] }}"
+
+    - name: "[PING] Ping vers Machine2 (192.168.2.1)"
+      command: ping -c 3 -W 2 192.168.2.1
+      register: ping_m2
+      changed_when: false
+      ignore_errors: true
+
+    - name: "[PING] Résultat ping Machine2"
+      debug:
+        msg: "{{ ping_m2.stdout_lines[-3:] if ping_m2.stdout_lines is defined else 'Machine2 non joignable (normal si pas encore configurée)' }}"
+
+    # ════════════════════════════════════════════════════════════════════
+    # 6. RÉSUMÉ FINAL
+    # ════════════════════════════════════════════════════════════════════
+
+    - name: "[CHECK] Résumé final Machine1"
+      debug:
+        msg:
+          - "════════════════════════════════════════════"
+          - "  Machine1 configurée — RÉSUMÉ"
+          - "════════════════════════════════════════════"
+          - "  Hostname      : {{ hostname }}"
+          - "  Bond          : {{ bond.name }} (802.3ad)"
+          - "  Membres       : {{ bond.members | join(' + ') }}"
+          - "  Membres UP    : {{ members_up }} / {{ bond.members | length }}"
+          - "  IP bond0      : {{ bond.ip }}"
+          - "  Passerelle    : {{ bond.gateway }} (SW3 SVI VLAN10)"
+          - "  Route M2      : 192.168.2.0/24 via {{ bond.gateway }}"
+          - "  Ping GW       : {{ '0% loss ✓' if ping_gw.rc == 0 else 'ECHEC ✗' }}"
+          - "  Ping M2       : {{ '0% loss ✓' if ping_m2.rc == 0 else 'non joignable (M2 configurée ?)' }}"
+          - "════════════════════════════════════════════"
