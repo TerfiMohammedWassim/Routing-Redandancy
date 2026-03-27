@@ -5,7 +5,7 @@
 # ═══════════════════════════════════════════════════════════════════════════
 ---
 - name: Configuration complète Machine2
-  hosts: all
+  hosts: machine2
   gather_facts: true
   become: true
 
