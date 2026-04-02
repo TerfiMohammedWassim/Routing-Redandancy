@@ -20,8 +20,8 @@
       ip: "192.168.1.1/24"
       gateway: "192.168.1.254"       # SVI VLAN10 sur SW3
       members:
-        - eth0                       # vers SW1 swp3
-        - eth1                       # vers SW2 swp3
+        - ens33                       # vers SW1 swp3
+        - ens34                      # vers SW2 swp3
       mode: "802.3ad"
       miimon: 100
       lacp_rate: fast
