@@ -7,7 +7,7 @@
 - name: Configuration complète Machine2
   hosts: machine2
   gather_facts: true
-  become: true
+  
 
   vars:
 
@@ -20,8 +20,8 @@
       ip: "192.168.2.1/24"
       gateway: "192.168.2.254"       # SVI VLAN20 sur SW3
       members:
-        - ens33                       # vers SW1 swp4
-        - ens34                       # vers SW2 swp4
+        - eth0                       # vers SW1 swp4
+        - eth1                       # vers SW2 swp4
       mode: "802.3ad"
       miimon: 100
       lacp_rate: fast
