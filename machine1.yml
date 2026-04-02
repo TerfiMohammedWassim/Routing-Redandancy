@@ -7,8 +7,6 @@
 - name: Configuration complète Machine1
   hosts: machine1
   gather_facts: true
-  become: true
-
   vars:
 
     # ── Identité système ──────────────────────────────────────────────────
@@ -20,8 +18,8 @@
       ip: "192.168.1.1/24"
       gateway: "192.168.1.254"       # SVI VLAN10 sur SW3
       members:
-        - ens33                       # vers SW1 swp3
-        - ens34                      # vers SW2 swp3
+        - eth0                       # vers SW1 swp3
+        - eth1                       # vers SW2 swp3
       mode: "802.3ad"
       miimon: 100
       lacp_rate: fast
@@ -76,12 +74,12 @@
         line: "127.0.1.1 {{ hostname }}"
         state: present
 
-    - name: "[SYS] Mettre à jour les paquets et installer les dépendances"
-      apt:
-        name: "{{ required_packages }}"
-        state: present
-        update_cache: true
-        cache_valid_time: 3600
+#    - name: "[SYS] Mettre à jour les paquets et installer les dépendances"
+#      apt:
+#        name: "{{ required_packages }}"
+#        state: present
+#        update_cache: true
+#        cache_valid_time: 3600
 
     - name: "[SYS] Charger les modules kernel"
       modprobe:
