@@ -1,61 +1,54 @@
 # ═══════════════════════════════════════════════════════════════════════════
-# PLAYBOOK AUTONOME — SW2 (Cumulus VX 4.x)
+# PLAYBOOK AUTONOME — SW2 (Cumulus VX 4.6)
 # Rôle : Access switch MLAG secondary
-# Usage : ansible-playbook -i "IP_SW2," sw2.yml -u cumulus -k --become
+# Usage : ansible-playbook -i /etc/ansible/hosts sw2.yml
 # ═══════════════════════════════════════════════════════════════════════════
 ---
 - name: Configuration complète SW2
   hosts: sw2
   gather_facts: false
-  become: true
+  become: false                          # become géré tâche par tâche
 
   vars:
 
-    # ── Identité système ──────────────────────────────────────────────────
     hostname: sw2
     loopback_ip: "10.10.10.2/32"
 
-    # ── Paramètres MLAG ───────────────────────────────────────────────────
     mlag:
       role: secondary
-      sys_mac: "44:38:39:FF:01:01"         # identique à SW1 — obligatoire
+      sys_mac: "44:38:39:FF:01:01"       # identique à SW1 — obligatoire
       peerlink_name: peerlink
       peerlink_members:
         - swp1
         - swp2
-      peerlink_ip: "169.254.1.2/30"        # inversé par rapport à SW1
-      peer_ip: "169.254.1.1"               # inversé par rapport à SW1
-      backup_ip: "10.10.10.1"              # inversé par rapport à SW1
+      peerlink_ip: "169.254.1.2/30"      # inversé par rapport à SW1
+      peer_ip: "169.254.1.1"             # inversé par rapport à SW1
+      backup_ip: "10.10.10.1"            # inversé par rapport à SW1
       keepalive_ip: "10.10.10.2/32"
 
-    # ── Bonds MLAG vers les machines ──────────────────────────────────────
     mlag_bonds:
       - name: bond_m1
-        slave: swp3                        # même clag-id que SW1
+        slave: swp3
         clag_id: 1
         vlan: 10
       - name: bond_m2
-        slave: swp4                        # même clag-id que SW1
+        slave: swp4
         clag_id: 2
         vlan: 20
 
-    # ── Uplink vers SW3 ───────────────────────────────────────────────────
     uplink_port: swp5
 
-    # ── Bridge ────────────────────────────────────────────────────────────
     bridge:
       name: bridge
       vids: "10,20"
       pvid: 1
 
-    # ── Routes statiques ──────────────────────────────────────────────────
     static_routes:
       - prefix: "192.168.1.0/24"
         dev: bridge
       - prefix: "192.168.2.0/24"
         dev: bridge
 
-    # ── Sysctl ────────────────────────────────────────────────────────────
     sysctl_settings:
       - name: net.ipv4.ip_forward
         value: "0"
@@ -65,12 +58,21 @@
   tasks:
 
     # ════════════════════════════════════════════════════════════════════
+    # 0. RÉCUPÉRER LA DATE
+    # ════════════════════════════════════════════════════════════════════
+
+    - name: "[PRE] Récupérer la date"
+      setup:
+        filter: ansible_date_time
+
+    # ════════════════════════════════════════════════════════════════════
     # 1. PARAMÈTRES SYSTÈME
     # ════════════════════════════════════════════════════════════════════
 
     - name: "[SYS] Définir le hostname"
       hostname:
         name: "{{ hostname }}"
+      become: true
 
     - name: "[SYS] Mettre à jour /etc/hosts"
       lineinfile:
@@ -78,6 +80,7 @@
         regexp: '^127\.0\.1\.1'
         line: "127.0.1.1 {{ hostname }}"
         state: present
+      become: true
 
     - name: "[SYS] Appliquer les paramètres sysctl"
       sysctl:
@@ -87,6 +90,7 @@
         reload: true
         sysctl_file: /etc/sysctl.d/99-campus.conf
       loop: "{{ sysctl_settings }}"
+      become: true
 
     # ════════════════════════════════════════════════════════════════════
     # 2. INTERFACES RÉSEAU
@@ -95,8 +99,9 @@
     - name: "[NET] Sauvegarder l'ancien fichier interfaces"
       copy:
         src: /etc/network/interfaces
-        dest: "/etc/network/interfaces.bak.{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+        dest: "/etc/network/interfaces.bak.{{ ansible_date_time.iso8601_basic_short }}"
         remote_src: true
+      become: true
       ignore_errors: true
 
     - name: "[NET] Déployer /etc/network/interfaces"
@@ -107,7 +112,7 @@
         mode: '0644'
         content: |
           # /etc/network/interfaces — {{ hostname }}
-          # Généré par Ansible — {{ lookup('pipe', 'date') }}
+          # Généré par Ansible — {{ ansible_date_time.date }}
 
           auto lo
           iface lo inet loopback
@@ -138,6 +143,7 @@
               clagd-peer-ip {{ mlag.peer_ip }}
               clagd-backup-ip {{ mlag.backup_ip }}
               clagd-sys-mac {{ mlag.sys_mac }}
+              clagd-args --initDelay 0
               address {{ mlag.peerlink_ip }}
 
           # ── Uplink vers SW3 ──────────────────────────────────────────
@@ -164,24 +170,53 @@
               bridge-ports {{ mlag_bonds | map(attribute='name') | join(' ') }} {{ mlag.peerlink_name }} {{ uplink_port }}
               bridge-vids {{ bridge.vids }}
               bridge-pvid {{ bridge.pvid }}
+              post-up ip route replace 192.168.1.0/24 dev {{ bridge.name }} || true
+              post-up ip route replace 192.168.2.0/24 dev {{ bridge.name }} || true
+      become: true
 
     # ════════════════════════════════════════════════════════════════════
-    # 3. MLAG
+    # 3. IFRELOAD — ASYNC pour éviter la coupure SSH
     # ════════════════════════════════════════════════════════════════════
 
-    - name: "[MLAG] Recharger les interfaces"
-      command: ifreload -a
-      changed_when: true
+    - name: "[NET] Sauvegarder l'IP eth0"
+      shell: ip addr show eth0 | grep 'inet ' | awk '{print $2}' | cut -d/ -f1
+      register: eth0_ip
+      changed_when: false
 
-    - name: "[MLAG] Attendre le démarrage de clagd (5s)"
-      wait_for:
-        timeout: 5
-      delegate_to: localhost
+    - name: "[NET] Sauvegarder la gateway eth0"
+      shell: ip route show default | awk '/default/ {print $3}' | head -1
+      register: eth0_gw
+      changed_when: false
+
+    - name: "[NET] Recharger les interfaces (async — évite coupure SSH)"
+      shell: |
+        sleep 2
+        ifreload -a || true
+        ip addr show eth0 | grep -q '{{ eth0_ip.stdout }}' || \
+          ip addr add {{ eth0_ip.stdout }}/24 dev eth0
+        ip route show default | grep -q default || \
+          ip route add default via {{ eth0_gw.stdout }}
+      async: 45
+      poll: 0
+      become: true
+
+    - name: "[NET] Attendre que SW2 revienne (15s)"
+      pause:
+        seconds: 15
+
+    - name: "[NET] Vérifier que SW2 est joignable"
+      wait_for_connection:
+        timeout: 45
+
+    # ════════════════════════════════════════════════════════════════════
+    # 4. VÉRIFICATION MLAG
+    # ════════════════════════════════════════════════════════════════════
 
     - name: "[MLAG] Vérifier l'état clagd"
       command: clagctl status
       register: clag_status
       changed_when: false
+      ignore_errors: true
 
     - name: "[MLAG] Afficher l'état MLAG"
       debug:
@@ -191,11 +226,11 @@
       assert:
         that: "'peer is alive' in clag_status.stdout"
         fail_msg: "AVERTISSEMENT : peer SW1 non détecté (normal si SW1 pas encore configuré)"
-        success_msg: "OK : peer SW1 détecté (peer alive) ✓"
+        success_msg: "OK : peer SW1 détecté ✓"
       ignore_errors: true
 
     # ════════════════════════════════════════════════════════════════════
-    # 4. ROUTES STATIQUES
+    # 5. ROUTES STATIQUES
     # ════════════════════════════════════════════════════════════════════
 
     - name: "[ROUTE] Appliquer les routes dans le kernel"
@@ -214,7 +249,7 @@
         msg: "{{ route_table.stdout_lines }}"
 
     # ════════════════════════════════════════════════════════════════════
-    # 5. VÉRIFICATION FINALE
+    # 6. VÉRIFICATION FINALE
     # ════════════════════════════════════════════════════════════════════
 
     - name: "[CHECK] État de toutes les interfaces"
