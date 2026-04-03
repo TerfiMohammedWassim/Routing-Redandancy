@@ -169,7 +169,8 @@
               bridge-ports {{ mlag_bonds | map(attribute='name') | join(' ') }} {{ mlag.peerlink_name }} {{ uplink_port }}
               bridge-vids {{ bridge.vids }}
               bridge-pvid {{ bridge.pvid }}
-
+              post-up bridge vlan add dev {{ bridge.name }} vid 10 self
+              post-up bridge vlan add dev {{ bridge.name }} vid 20 self
     # ════════════════════════════════════════════════════════════════════
     # 3. MLAG — Vérification du démon clagd
     # ════════════════════════════════════════════════════════════════════
