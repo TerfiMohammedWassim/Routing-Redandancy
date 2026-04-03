@@ -1,6 +1,14 @@
 # ═══════════════════════════════════════════════════════════════════════════
 # PLAYBOOK AUTONOME — SW1 (Cumulus VX 4.x)
 # Rôle : Access switch MLAG primary
+#
+# Câblage :
+#   swp1+swp2  → peerlink inter-chassis vers SW2
+#   swp3       → Machine1 (membre bond_m1, clag-id 1, VLAN10)
+#   swp4       → Machine2 (membre bond_m2, clag-id 2, VLAN20)
+#   swp5       → SW3 swp1  ┐ bond_core dual-homed
+#   swp6       → SW4 swp1  ┘ clag-id 10, trunk VLAN10+20
+#
 # Usage : ansible-playbook -i "IP_SW1," sw1.yml -u cumulus -k --become
 # ═══════════════════════════════════════════════════════════════════════════
 ---
@@ -11,63 +19,55 @@
 
   vars:
 
-    # ── Identité système ──────────────────────────────────────────────────
     hostname: sw1
     loopback_ip: "10.10.10.1/32"
 
-    # ── Paramètres MLAG ───────────────────────────────────────────────────
     mlag:
       role: primary
-      sys_mac: "44:38:39:FF:01:01"
+      sys_mac: "44:38:39:FF:01:01"       # identique à SW2 — obligatoire
       peerlink_name: peerlink
       peerlink_members:
         - swp1
         - swp2
       peerlink_ip: "169.254.1.1/30"
       peer_ip: "169.254.1.2"
-      backup_ip: "10.10.10.2"
+      backup_ip: "10.10.10.2"            # loopback SW2 — keepalive OOB
       keepalive_ip: "10.10.10.1/32"
 
-    # ── Bonds MLAG vers les machines ──────────────────────────────────────
+    # Bonds vers les machines (accès hôtes)
     mlag_bonds:
       - name: bond_m1
         slave: swp3
         clag_id: 1
         vlan: 10
+        description: "Machine1 → VLAN10"
       - name: bond_m2
         slave: swp4
         clag_id: 2
         vlan: 20
+        description: "Machine2 → VLAN20"
 
-    # ── Uplink vers SW3 et SW4 (core redundancy) ──────────────────────────
-    uplink_ports:
-      - swp5    # vers SW3 (MLAG bond clag-id 1)
-      - swp6    # vers SW4 (MLAG bond clag-id 1)
+    # Bond uplink dual-homed vers les deux core (SW3 + SW4)
+    # C'est un bond MLAG côté access : swp5→SW3 et swp6→SW4
+    # Du côté core, SW3 et SW4 ont chacun un bond vers SW1 avec le même clag-id
+    uplink_bond:
+      name: bond_core
+      members:
+        - swp5    # vers SW3 swp1
+        - swp6    # vers SW4 swp1
+      clag_id: 10
+      description: "Uplink dual-homed SW3+SW4"
 
-    # ── Bridge ────────────────────────────────────────────────────────────
     bridge:
       name: bridge
       vids: "10,20"
       pvid: 1
 
-    # ── Routes statiques (vers les réseaux des machines) ──────────────────
-    static_routes:
-      - prefix: "192.168.1.0/24"
-        via: "192.168.1.254"
-        dev: bridge
-      - prefix: "192.168.2.0/24"
-        via: "192.168.2.254"
-        dev: bridge
-
-    # ── Sysctl ────────────────────────────────────────────────────────────
     sysctl_settings:
       - name: net.ipv4.ip_forward
-        value: "0"                     # SW1 ne route pas, SW3 route
+        value: "0"                         # SW1 ne route pas, SW3/SW4 routent
       - name: net.core.netdev_max_backlog
         value: "1000"
-
-  # ── Contenu du fichier /etc/network/interfaces ──────────────────────────
-  vars_files: []
 
   tasks:
 
@@ -96,7 +96,7 @@
       loop: "{{ sysctl_settings }}"
 
     # ════════════════════════════════════════════════════════════════════
-    # 2. INTERFACES RÉSEAU (génération du fichier interfaces)
+    # 2. INTERFACES RÉSEAU
     # ════════════════════════════════════════════════════════════════════
 
     - name: "[NET] Sauvegarder l'ancien fichier interfaces"
@@ -118,18 +118,19 @@
 
           auto lo
           iface lo inet loopback
-              address {{ mlag.keepalive_ip }}
+              address {{ loopback_ip }}
 
           auto eth0
           iface eth0 inet dhcp
 
-          # ── Membres du peerlink ──────────────────────────────────────
+          # ─────────────────────────────────────────────────────
+          # PEERLINK inter-chassis SW1 ↔ SW2 (swp1+swp2)
+          # ─────────────────────────────────────────────────────
           {% for port in mlag.peerlink_members %}
           auto {{ port }}
           iface {{ port }}
 
           {% endfor %}
-          # ── Peerlink bond (inter-chassis SW1 ↔ SW2) ─────────────────
           auto {{ mlag.peerlink_name }}
           iface {{ mlag.peerlink_name }}
               bond-slaves {{ mlag.peerlink_members | join(' ') }}
@@ -138,23 +139,23 @@
               bond-lacp-rate fast
               bond-min-links 1
 
-          # ── Sous-interface MLAG ──────────────────────────────────────
           auto {{ mlag.peerlink_name }}.4094
           iface {{ mlag.peerlink_name }}.4094
               clagd-enable yes
               clagd-peer-ip {{ mlag.peer_ip }}
               clagd-backup-ip {{ mlag.backup_ip }}
               clagd-sys-mac {{ mlag.sys_mac }}
+              clagd-priority 1000
               address {{ mlag.peerlink_ip }}
 
-          # ── Uplinks vers SW3 et SW4 (core redundancy) ────────────────────
-          {% for port in uplink_ports %}
-          auto {{ port }}
-          iface {{ port }}
-
-          {% endfor %}
-          # ── Bonds MLAG ───────────────────────────────────────────────
+          # ─────────────────────────────────────────────────────
+          # BONDS MLAG vers les machines (hôtes)
+          # ─────────────────────────────────────────────────────
           {% for bond in mlag_bonds %}
+          # {{ bond.description }}
+          auto {{ bond.slave }}
+          iface {{ bond.slave }}
+
           auto {{ bond.name }}
           iface {{ bond.name }}
               bond-slaves {{ bond.slave }}
@@ -166,99 +167,127 @@
               bridge-access {{ bond.vlan }}
 
           {% endfor %}
-          # ── Bridge VLAN-aware ────────────────────────────────────────
+          # ─────────────────────────────────────────────────────
+          # UPLINK dual-homed vers SW3 (swp5) et SW4 (swp6)
+          # Bond MLAG — même clag-id sur SW3 et SW4
+          # Si SW3 tombe : trafic bascule sur swp6→SW4 automatiquement
+          # ─────────────────────────────────────────────────────
+          # {{ uplink_bond.description }}
+          {% for port in uplink_bond.members %}
+          auto {{ port }}
+          iface {{ port }}
+
+          {% endfor %}
+          auto {{ uplink_bond.name }}
+          iface {{ uplink_bond.name }}
+              bond-slaves {{ uplink_bond.members | join(' ') }}
+              bond-mode 802.3ad
+              bond-miimon 100
+              bond-lacp-rate fast
+              bond-min-links 1
+              clag-id {{ uplink_bond.clag_id }}
+              bridge-vids {{ bridge.vids }}
+
+          # ─────────────────────────────────────────────────────
+          # BRIDGE VLAN-aware
+          # ─────────────────────────────────────────────────────
           auto {{ bridge.name }}
           iface {{ bridge.name }}
               bridge-vlan-aware yes
-              bridge-ports {{ mlag_bonds | map(attribute='name') | join(' ') }} {{ mlag.peerlink_name }} {{ uplink_ports | join(' ') }}
+              bridge-ports {{ mlag_bonds | map(attribute='name') | join(' ') }} {{ uplink_bond.name }} {{ mlag.peerlink_name }}
               bridge-vids {{ bridge.vids }}
               bridge-pvid {{ bridge.pvid }}
               post-up bridge vlan add dev {{ bridge.name }} vid 10 self
               post-up bridge vlan add dev {{ bridge.name }} vid 20 self
+
     # ════════════════════════════════════════════════════════════════════
-    # 3. MLAG — Vérification du démon clagd
+    # 3. RELOAD RÉSEAU
     # ════════════════════════════════════════════════════════════════════
 
-    - name: "[MLAG] Recharger les interfaces"
+    - name: "[NET] Recharger les interfaces"
       command: ifreload -a
+      async: 20
+      poll: 0
       changed_when: true
 
-    - name: "[MLAG] Attendre le démarrage de clagd (5s)"
+    - name: "[NET] Attendre stabilisation (8s)"
       wait_for:
-        timeout: 5
+        timeout: 8
       delegate_to: localhost
+
+    - name: "[NET] Vérifier que SW1 est joignable"
+      wait_for_connection:
+        timeout: 30
+
+    # ════════════════════════════════════════════════════════════════════
+    # 4. VÉRIFICATION MLAG
+    # ════════════════════════════════════════════════════════════════════
 
     - name: "[MLAG] Vérifier l'état clagd"
       command: clagctl status
       register: clag_status
       changed_when: false
+      ignore_errors: true
 
     - name: "[MLAG] Afficher l'état MLAG"
       debug:
         msg: "{{ clag_status.stdout_lines }}"
 
-    # ════════════════════════════════════════════════════════════════════
-    # 4. ROUTES STATIQUES
-    # ════════════════════════════════════════════════════════════════════
-
-    - name: "[ROUTE] Ajouter les routes statiques persistantes"
-      lineinfile:
-        path: /etc/network/interfaces
-        line: "    post-up ip route add {{ item.prefix }} dev {{ item.dev }} || true"
-        insertafter: "bridge-pvid"
-        state: present
-      loop: "{{ static_routes }}"
-
-    - name: "[ROUTE] Appliquer les routes dans le kernel"
-      command: "ip route replace {{ item.prefix }} dev {{ item.dev }}"
-      loop: "{{ static_routes }}"
+    - name: "[MLAG] Vérifier que le peer SW2 est alive"
+      assert:
+        that: "'peer is alive' in clag_status.stdout"
+        fail_msg: "AVERTISSEMENT : peer SW2 non détecté"
+        success_msg: "OK : peer SW2 détecté ✓"
       ignore_errors: true
-      changed_when: true
-
-    - name: "[ROUTE] Vérifier la table de routage"
-      command: ip route show
-      register: route_table
-      changed_when: false
-
-    - name: "[ROUTE] Afficher les routes"
-      debug:
-        msg: "{{ route_table.stdout_lines }}"
 
     # ════════════════════════════════════════════════════════════════════
-    # 5. VÉRIFICATION FINALE
+    # 5. VÉRIFICATION BRIDGE ET VLANs
     # ════════════════════════════════════════════════════════════════════
 
-    - name: "[CHECK] État de toutes les interfaces"
+    - name: "[BRIDGE] État de toutes les interfaces"
       command: net show interface all
       register: iface_all
       changed_when: false
+      ignore_errors: true
 
-    - name: "[CHECK] Afficher les interfaces"
+    - name: "[BRIDGE] Afficher les interfaces"
       debug:
         msg: "{{ iface_all.stdout_lines }}"
 
-    - name: "[CHECK] VLANs sur le bridge"
+    - name: "[BRIDGE] VLANs sur le bridge"
       command: bridge vlan show
       register: bridge_vlans
       changed_when: false
 
-    - name: "[CHECK] Afficher les VLANs"
+    - name: "[BRIDGE] Afficher les VLANs"
       debug:
         msg: "{{ bridge_vlans.stdout_lines }}"
+
+    - name: "[BRIDGE] Confirmer VLAN 10 et 20 présents"
+      assert:
+        that:
+          - "'10' in bridge_vlans.stdout"
+          - "'20' in bridge_vlans.stdout"
+        fail_msg: "ERREUR : VLAN 10 ou 20 manquant sur le bridge"
+        success_msg: "OK : VLAN 10 et 20 présents ✓"
+
+    # ════════════════════════════════════════════════════════════════════
+    # 6. RÉSUMÉ FINAL
+    # ════════════════════════════════════════════════════════════════════
 
     - name: "[CHECK] Résumé final SW1"
       debug:
         msg:
-          - "════════════════════════════════════"
+          - "════════════════════════════════════════════"
           - "  SW1 configuré — RÉSUMÉ"
-          - "════════════════════════════════════"
-          - "  Hostname    : {{ hostname }}"
-          - "  Loopback    : {{ mlag.keepalive_ip }}"
-          - "  MLAG rôle   : {{ mlag.role }}"
-          - "  Peerlink    : {{ mlag.peerlink_members | join('+') }}"
-          - "  Peer IP     : {{ mlag.peer_ip }}"
-          - "  Backup IP   : {{ mlag.backup_ip }}"
-          - "  bond_m1     : swp3 → VLAN10"
-          - "  bond_m2     : swp4 → VLAN20"
-          - "  Uplink SW3  : {{ uplink_port }}"
-          - "════════════════════════════════════"
+          - "════════════════════════════════════════════"
+          - "  Hostname       : {{ hostname }}"
+          - "  Loopback       : {{ loopback_ip }}"
+          - "  MLAG rôle      : {{ mlag.role }}"
+          - "  MLAG sys-mac   : {{ mlag.sys_mac }}"
+          - "  Peerlink (SW2) : {{ mlag.peerlink_ip }} ↔ {{ mlag.peer_ip }}"
+          - "  bond_m1 swp3   : clag-id 1 → VLAN10 (Machine1)"
+          - "  bond_m2 swp4   : clag-id 2 → VLAN20 (Machine2)"
+          - "  bond_core      : swp5→SW3 + swp6→SW4, clag-id 10"
+          - "  Statut MLAG    : {{ 'peer alive ✓' if 'peer is alive' in clag_status.stdout else 'peer absent ✗' }}"
+          - "════════════════════════════════════════════"
