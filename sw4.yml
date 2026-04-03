@@ -37,11 +37,11 @@
       - name: bond_sw1
         slave: swp3
         clag_id: 10
-        description: "Uplink depuis SW1 (swp6→swp1)"
+        description: "Uplink depuis SW1 (swp6→swp3)"
       - name: bond_sw2
         slave: swp4
         clag_id: 20
-        description: "Uplink depuis SW2 (swp6→swp2)"
+        description: "Uplink depuis SW2 (swp6→swp4)"
 
     bridge:
       name: bridge
