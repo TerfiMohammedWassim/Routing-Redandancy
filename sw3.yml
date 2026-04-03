@@ -17,7 +17,7 @@
 - name: Configuration complète SW3
   hosts: sw3
   gather_facts: false
-  become: true
+  become: false
 
   vars:
 
@@ -29,8 +29,8 @@
       sys_mac: "44:38:39:FF:03:03"
       peerlink_name: peerlink
       peerlink_members:
-        - swp49
-        - swp50
+        - swp1
+        - swp2
       peerlink_ip: "169.254.2.1/30"
       peer_ip: "169.254.2.2"
       backup_ip: "10.10.10.4"
@@ -38,11 +38,11 @@
 
     mlag_bonds:
       - name: bond_sw1
-        slave: swp1
+        slave: swp3
         clag_id: 10
         description: "Uplink depuis SW1 (swp5→swp1)"
       - name: bond_sw2
-        slave: swp2
+        slave: swp4
         clag_id: 20
         description: "Uplink depuis SW2 (swp5→swp2)"
 
