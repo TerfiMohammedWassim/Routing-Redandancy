@@ -2,10 +2,10 @@
 # PLAYBOOK AUTONOME — SW3 (Cumulus VX 4.x)
 # Rôle : Core switch L3 MLAG primary — routage inter-VLAN + redundancy avec SW4
 #
-# Câblage :
-#   swp1       → SW1 swp5  ┐ bond_access dual-homed (clag-id 10)
-#   swp2       → SW2 swp5  ┘
-#   swp3+swp4  → peerlink vers SW4 (swp1+swp2)
+# Câblage (LAN Segments) :
+#   swp1+swp2  → peerlink vers SW4 (seg9+seg10)
+#   swp3       → SW2 swp4 (seg6)  ┐ bond_access dual-homed (clag-id 10)
+#   swp4       → SW1 swp5 (seg5)  ┘
 #
 # Logique de basculement :
 #   clagd-priority 1000 (SW3) < 32768 (SW4) → SW3 est toujours primary
@@ -29,22 +29,18 @@
       sys_mac: "44:38:39:FF:03:03"
       peerlink_name: peerlink
       peerlink_members:
-        - swp3
-        - swp4
+        - swp1          # seg9 → SW4 swp1
+        - swp2          # seg10 → SW4 swp2
       peerlink_ip: "169.254.2.1/30"
       peer_ip: "169.254.2.2"
-      # backup_ip désactivé temporairement - non requis si peerlink fiable
-      # backup_ip: "10.10.10.4"
       keepalive_ip: "10.10.10.3/32"
 
-    # Bond MLAG dual-homed : SW1 et SW2 envoient leur trafic via bond_core
-    # avec le même clag-id. Côté core, on crée un seul bond qui reçoit
-    # les deux liens (swp1 de SW1, swp2 de SW2).
+    # Bond MLAG dual-homed : reçoit le trafic de SW1 et SW2
     mlag_bonds:
       - name: bond_access
         slaves:
-          - swp1    # vers SW1 swp5
-          - swp2    # vers SW2 swp5
+          - swp3        # seg6 → SW2 swp4
+          - swp4        # seg5 → SW1 swp5
         clag_id: 10
         description: "Dual-homed depuis SW1+SW2 (clag-id 10)"
 

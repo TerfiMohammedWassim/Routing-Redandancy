@@ -2,10 +2,10 @@
 # PLAYBOOK AUTONOME — SW4 (Cumulus VX 4.x)
 # Rôle : Core switch L3 MLAG secondary — prend le relai si SW3 tombe
 #
-# Câblage :
-#   swp1+swp2  → peerlink vers SW3 (swp3+swp4)
-#   swp3       → SW1 swp6  ┐ bond_access dual-homed (clag-id 10)
-#   swp4       → SW2 swp6  ┘
+# Câblage (LAN Segments) :
+#   swp1+swp2  → peerlink vers SW3 (seg9+seg10)
+#   swp3       → SW1 swp6 (seg11) ┐ bond_access dual-homed (clag-id 10)
+#   swp4       → SW2 swp6 (seg12) ┘
 #
 # Usage : ansible-playbook -i "IP_SW4," sw4.yml -u cumulus -k --become
 # ═══════════════════════════════════════════════════════════════════════════
@@ -25,20 +25,18 @@
       sys_mac: "44:38:39:FF:03:03"       # DOIT être identique à SW3
       peerlink_name: peerlink
       peerlink_members:
-        - swp1
-        - swp2
+        - swp1          # seg9 → SW3 swp1
+        - swp2          # seg10 → SW3 swp2
       peerlink_ip: "169.254.2.2/30"      # inversé par rapport à SW3
       peer_ip: "169.254.2.1"
-      # backup_ip désactivé temporairement - non requis si peerlink fiable
-      # backup_ip: "10.10.10.3"
       keepalive_ip: "10.10.10.4/32"
 
     # clag-id DOIT être identique à SW3 — même bond dual-homed
     mlag_bonds:
       - name: bond_access
         slaves:
-          - swp3    # vers SW1 swp6
-          - swp4    # vers SW2 swp6
+          - swp3        # seg11 → SW1 swp6
+          - swp4        # seg12 → SW2 swp6
         clag_id: 10
         description: "Dual-homed depuis SW1+SW2 (clag-id 10)"
 

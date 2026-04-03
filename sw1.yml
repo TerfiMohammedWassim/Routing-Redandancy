@@ -2,12 +2,12 @@
 # PLAYBOOK AUTONOME — SW1 (Cumulus VX 4.x)
 # Rôle : Access switch MLAG primary
 #
-# Câblage :
-#   swp1+swp2  → peerlink inter-chassis vers SW2
-#   swp3       → Machine1 (membre bond_m1, clag-id 1, VLAN10)
-#   swp4       → Machine2 (membre bond_m2, clag-id 2, VLAN20)
-#   swp5       → SW3 swp1  ┐ bond_core dual-homed
-#   swp6       → SW4 swp1  ┘ clag-id 10, trunk VLAN10+20
+# Câblage (LAN Segments) :
+#   swp1+swp2  → peerlink inter-chassis vers SW2 (seg1+seg2)
+#   swp3       → Machine1 (seg3, clag-id 1, VLAN10)
+#   swp4       → Machine2 (seg4, clag-id 2, VLAN20)
+#   swp5       → SW3 swp4 (seg5)  ┐ bond_core dual-homed
+#   swp6       → SW4 swp3 (seg11) ┘ clag-id 10, trunk VLAN10+20
 #
 # Usage : ansible-playbook -i "IP_SW1," sw1.yml -u cumulus -k --become
 # ═══════════════════════════════════════════════════════════════════════════

@@ -2,12 +2,12 @@
 # PLAYBOOK AUTONOME — SW2 (Cumulus VX 4.x)
 # Rôle : Access switch MLAG secondary
 #
-# Câblage :
-#   swp1+swp2  → peerlink inter-chassis vers SW1
-#   swp3       → Machine1 (membre bond_m1, clag-id 1, VLAN10)
-#   swp4       → Machine2 (membre bond_m2, clag-id 2, VLAN20)
-#   swp5       → SW3 swp2  ┐ bond_core dual-homed
-#   swp6       → SW4 swp2  ┘ clag-id 10, trunk VLAN10+20
+# Câblage (LAN Segments) :
+#   swp1+swp2  → peerlink inter-chassis vers SW1 (seg1+seg2)
+#   swp3       → Machine1 (seg7, clag-id 1, VLAN10)
+#   swp5       → Machine2 (seg8, clag-id 2, VLAN20)
+#   swp4       → SW3 swp3 (seg6)  ┐ bond_core dual-homed
+#   swp6       → SW4 swp4 (seg12) ┘ clag-id 10, trunk VLAN10+20
 #
 # Usage : ansible-playbook -i "IP_SW2," sw2.yml -u cumulus -k --become
 # ═══════════════════════════════════════════════════════════════════════════
@@ -36,12 +36,12 @@
 
     mlag_bonds:
       - name: bond_m1
-        slave: swp3
+        slave: swp3         # seg7 → Machine1
         clag_id: 1
         vlan: 10
         description: "Machine1 → VLAN10"
       - name: bond_m2
-        slave: swp4
+        slave: swp5         # seg8 → Machine2 (CORRIGÉ: était swp4)
         clag_id: 2
         vlan: 20
         description: "Machine2 → VLAN20"
@@ -49,8 +49,8 @@
     uplink_bond:
       name: bond_core
       members:
-        - swp5    # vers SW3 swp2
-        - swp6    # vers SW4 swp2
+        - swp4    # seg6 → SW3 swp3 (CORRIGÉ: était swp5)
+        - swp6    # seg12 → SW4 swp4
       clag_id: 10
       description: "Uplink dual-homed SW3+SW4"
 
