@@ -3,8 +3,8 @@
 # Rôle : Core switch L3 MLAG secondary — prend le relai si SW3 tombe
 #
 # Câblage :
-#   swp1       → SW1 swp6  bond_sw1 (clag-id 10)
-#   swp2       → SW2 swp6  bond_sw2 (clag-id 20)
+#   swp1       → SW1 swp6  ┐ bond_access dual-homed (clag-id 10)
+#   swp2       → SW2 swp6  ┘
 #   swp49+swp50→ peerlink vers SW3
 #
 # Usage : ansible-playbook -i "IP_SW4," sw4.yml -u cumulus -k --become
@@ -25,23 +25,21 @@
       sys_mac: "44:38:39:FF:03:03"       # DOIT être identique à SW3
       peerlink_name: peerlink
       peerlink_members:
-        - swp1
-        - swp2
+        - swp49
+        - swp50
       peerlink_ip: "169.254.2.2/30"      # inversé par rapport à SW3
       peer_ip: "169.254.2.1"
       backup_ip: "10.10.10.3"
       keepalive_ip: "10.10.10.4/32"
 
-    # clag-id DOIT être identiques à SW3
+    # clag-id DOIT être identique à SW3 — même bond dual-homed
     mlag_bonds:
-      - name: bond_sw1
-        slave: swp3
+      - name: bond_access
+        slaves:
+          - swp1    # vers SW1 swp6
+          - swp2    # vers SW2 swp6
         clag_id: 10
-        description: "Uplink depuis SW1 (swp6→swp3)"
-      - name: bond_sw2
-        slave: swp4
-        clag_id: 20
-        description: "Uplink depuis SW2 (swp6→swp4)"
+        description: "Dual-homed depuis SW1+SW2 (clag-id 10)"
 
     bridge:
       name: bridge
@@ -151,16 +149,20 @@
               address {{ mlag.peerlink_ip }}
 
           # ─────────────────────────────────────────────────────
-          # BONDS MLAG vers SW1 et SW2
+          # BOND MLAG dual-homed vers SW1+SW2
+          # Ce bond reçoit le trafic de bond_core de SW1 (swp6) et SW2 (swp6)
+          # Le clag-id 10 doit correspondre au clag-id du bond_core côté access
           # ─────────────────────────────────────────────────────
           {% for bond in mlag_bonds %}
           # {{ bond.description }}
-          auto {{ bond.slave }}
-          iface {{ bond.slave }}
+          {% for slave in bond.slaves %}
+          auto {{ slave }}
+          iface {{ slave }}
 
+          {% endfor %}
           auto {{ bond.name }}
           iface {{ bond.name }}
-              bond-slaves {{ bond.slave }}
+              bond-slaves {{ bond.slaves | join(' ') }}
               bond-mode 802.3ad
               bond-miimon 100
               bond-lacp-rate fast
@@ -304,9 +306,8 @@
           - "  ip_forward      : 1"
           - "  MLAG Role       : {{ mlag.role }}"
           - "  clagd-priority  : 32768 (secondary)"
-          - "  Peerlink (SW3)  : {{ mlag.peerlink_ip }} ↔ {{ mlag.peer_ip }}"
-          - "  bond_sw1 swp1   : clag-id 10 ← SW1 swp6"
-          - "  bond_sw2 swp2   : clag-id 20 ← SW2 swp6"
+          - "  Peerlink (SW3)  : swp49+swp50, {{ mlag.peerlink_ip }} ↔ {{ mlag.peer_ip }}"
+          - "  bond_access     : swp1+swp2, clag-id 10 ← SW1/SW2"
           - "  SVI vlan10      : 192.168.1.254/24"
           - "  SVI vlan20      : 192.168.2.254/24"
           - "  Statut MLAG     : {{ 'peer alive ✓' if 'peer is alive' in clag_status.stdout else 'peer absent ✗' }}"
