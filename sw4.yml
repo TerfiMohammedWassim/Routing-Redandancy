@@ -25,8 +25,8 @@
       sys_mac: "44:38:39:FF:03:03"       # DOIT être identique à SW3
       peerlink_name: peerlink
       peerlink_members:
-        - swp49
-        - swp50
+        - swp1
+        - swp2
       peerlink_ip: "169.254.2.2/30"      # inversé par rapport à SW3
       peer_ip: "169.254.2.1"
       backup_ip: "10.10.10.3"
@@ -36,8 +36,8 @@
     mlag_bonds:
       - name: bond_access
         slaves:
-          - swp1    # vers SW1 swp6
-          - swp2    # vers SW2 swp6
+          - swp3    # vers SW1 swp6
+          - swp4    # vers SW2 swp6
         clag_id: 10
         description: "Dual-homed depuis SW1+SW2 (clag-id 10)"
 

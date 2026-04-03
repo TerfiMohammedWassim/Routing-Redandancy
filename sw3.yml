@@ -29,8 +29,8 @@
       sys_mac: "44:38:39:FF:03:03"
       peerlink_name: peerlink
       peerlink_members:
-        - swp49
-        - swp50
+        - swp3
+        - swp4
       peerlink_ip: "169.254.2.1/30"
       peer_ip: "169.254.2.2"
       backup_ip: "10.10.10.4"
