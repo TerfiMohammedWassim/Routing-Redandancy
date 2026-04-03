@@ -1,0 +1,348 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# PLAYBOOK AUTONOME — SW4 (Cumulus VX 4.x)
+# Rôle : Core switch L3 MLAG secondary — redundancy pair with SW3
+# Usage : ansible-playbook -i "IP_SW4," sw4.yml -u cumulus -k --become
+# ═══════════════════════════════════════════════════════════════════════════
+---
+- name: Configuration complète SW4
+  hosts: sw4
+  gather_facts: false
+
+  vars:
+
+    # ── Identité système ──────────────────────────────────────────────────
+    hostname: sw4
+    loopback_ip: "10.10.10.4/32"
+
+    # ── Paramètres MLAG (avec SW3) ────────────────────────────────────────
+    mlag:
+      role: secondary
+      sys_mac: "44:38:39:FF:03:03"       # MLAG avec SW3 — DOIT être identique à SW3
+      peerlink_name: peerlink
+      peerlink_members:
+        - swp49
+        - swp50
+      peerlink_ip: "169.254.2.2/30"      # Inversé par rapport à SW3
+      peer_ip: "169.254.2.1"             # Inversé par rapport à SW3
+      backup_ip: "10.10.10.3"            # IP de keepalive SW3
+      keepalive_ip: "10.10.10.4/32"
+
+    # ── Bonds MLAG vers SW1 et SW2 (port-channel) ────────────────────────
+    mlag_bonds:
+      - name: bond_sw1
+        slave: swp1
+        clag_id: 1
+        vlan: "10,20"
+        description: "MLAG vers SW1"
+      - name: bond_sw2
+        slave: swp2
+        clag_id: 2
+        vlan: "10,20"
+        description: "MLAG vers SW2"
+
+    # ── Bridge ────────────────────────────────────────────────────────────
+    bridge:
+      name: bridge
+      vids: "10,20"
+      pvid: 1
+
+    # ── SVIs — interfaces L3 par VLAN (identiques à SW3 pour le routage) ──
+    svi_interfaces:
+      - vlan_id: 10
+        ip_address: "192.168.1.254/24"
+        description: "Passerelle VLAN10 — Machine1"
+      - vlan_id: 20
+        ip_address: "192.168.2.254/24"
+        description: "Passerelle VLAN20 — Machine2"
+
+    # ── Routes statiques inter-VLAN ───────────────────────────────────────
+    static_routes:
+      - prefix: "192.168.1.0/24"
+        dev: vlan10
+        description: "Réseau Machine1"
+      - prefix: "192.168.2.0/24"
+        dev: vlan20
+        description: "Réseau Machine2"
+
+    # ── Sysctl — forwarding IP obligatoire ────────────────────────────────
+    sysctl_settings:
+      - name: net.ipv4.ip_forward
+        value: "1"
+      - name: net.ipv4.conf.all.rp_filter
+        value: "0"
+      - name: net.ipv4.conf.default.rp_filter
+        value: "0"
+      - name: net.core.netdev_max_backlog
+        value: "1000"
+
+  tasks:
+
+    # ════════════════════════════════════════════════════════════════════
+    # 1. PARAMÈTRES SYSTÈME
+    # ════════════════════════════════════════════════════════════════════
+
+    - name: "[SYS] Définir le hostname"
+      hostname:
+        name: "{{ hostname }}"
+
+    - name: "[SYS] Mettre à jour /etc/hosts"
+      lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.1\.1'
+        line: "127.0.1.1 {{ hostname }}"
+        state: present
+
+    - name: "[SYS] Appliquer les paramètres sysctl"
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: true
+        sysctl_file: /etc/sysctl.d/99-campus.conf
+      loop: "{{ sysctl_settings }}"
+
+    - name: "[SYS] Vérifier ip_forward actif"
+      command: sysctl net.ipv4.ip_forward
+      register: ip_fwd
+      changed_when: false
+
+    - name: "[SYS] Confirmer ip_forward = 1"
+      assert:
+        that: "'= 1' in ip_fwd.stdout"
+        fail_msg: "ERREUR CRITIQUE : ip_forward non activé sur SW4 — le routage inter-VLAN ne fonctionnera pas"
+        success_msg: "OK : ip_forward = 1 ✓"
+
+    # ════════════════════════════════════════════════════════════════════
+    # 2. INTERFACES RÉSEAU
+    # ════════════════════════════════════════════════════════════════════
+
+    - name: "[NET] Sauvegarder l'ancien fichier interfaces"
+      copy:
+        src: /etc/network/interfaces
+        dest: "/etc/network/interfaces.bak-{{ ansible_date_time.iso8601_basic_short }}"
+        remote_src: true
+        backup: true
+      ignore_errors: true
+
+    - name: "[NET] Générer /etc/network/interfaces — SW4"
+      template:
+        src: /dev/stdin
+        dest: /etc/network/interfaces
+        mode: '0644'
+      vars:
+        template_content: |
+          # Ansible managed — SW4
+          auto lo
+          iface lo inet loopback
+            address {{ loopback_ip }}
+
+          # ─────────────────────────────────────────────────────
+          # PEERLINK MLAG avec SW3 (swp49, swp50)
+          # ─────────────────────────────────────────────────────
+          auto swp49
+          iface swp49
+
+          auto swp50
+          iface swp50
+
+          auto peerlink
+          iface peerlink inet static
+            address {{ mlag.peerlink_ip }}
+            bond-slaves swp49 swp50
+            bond-mode active-backup
+            bond-miimon 100
+            bond-use-carrier yes
+
+          auto peerlink.4094
+          iface peerlink.4094 inet static
+            address 169.254.3.2/30
+            mstpctl-pathcost 169.254.3.1 0
+
+          # ─────────────────────────────────────────────────────
+          # MLAG avec SW1 et SW2
+          # ─────────────────────────────────────────────────────
+          auto swp1
+          iface swp1
+
+          auto swp2
+          iface swp2
+
+          auto bond_sw1
+          iface bond_sw1 inet manual
+            bond-slaves swp1
+            bond-mode active-backup
+            bond-miimon 100
+            clag-id 1
+
+          auto bond_sw2
+          iface bond_sw2 inet manual
+            bond-slaves swp2
+            bond-mode active-backup
+            bond-miimon 100
+            clag-id 2
+
+          # ─────────────────────────────────────────────────────
+          # BRIDGE (VLANs 10, 20)
+          # ─────────────────────────────────────────────────────
+          auto bridge
+          iface bridge inet manual
+            bridge-ports peerlink bond_sw1 bond_sw2
+            bridge-vids 10 20
+            bridge-pvid 1
+            bridge-vlan-aware yes
+
+          # ─────────────────────────────────────────────────────
+          # SVIs — Interfaces L3 pour le routage inter-VLAN
+          # ─────────────────────────────────────────────────────
+          auto vlan10
+          iface vlan10 inet static
+            address 192.168.1.254/24
+            vlan-id 10
+            vlan-raw-device bridge
+
+          auto vlan20
+          iface vlan20 inet static
+            address 192.168.2.254/24
+            vlan-id 20
+            vlan-raw-device bridge
+      notify: Recharger la configuration réseau
+
+    # ════════════════════════════════════════════════════════════════════
+    # 3. CLAGD (MLAG daemon) — configuration du keealive
+    # ════════════════════════════════════════════════════════════════════
+
+    - name: "[CLAG] Créer le fichier /etc/cumulus/ports.conf"
+      copy:
+        dest: /etc/cumulus/ports.conf
+        content: |
+          # Cumulus Ports Configuration
+          # swp49, swp50 sont réservés pour le peerlink
+        backup: true
+
+    - name: "[CLAG] Générer /etc/network/interfaces.d/clagd - SW4"
+      copy:
+        dest: /etc/network/interfaces.d/clagd
+        content: |
+          # Ansible managed — CLAGD pour SW4
+          auto clagd
+          iface clagd
+            clagd-sys-mac {{ mlag.sys_mac }}
+            clagd-primary-ip {{ mlag.peerlink_ip }}
+            clagd-peer-ip {{ mlag.peer_ip }}
+            clagd-backup-ip {{ mlag.backup_ip }}
+            clagd-keepalive-ip {{ mlag.keepalive_ip }} peer {{ mlag.backup_ip }}
+            clagd-priority 32768
+            clagd-peer-as 65000
+            clagd-vxlan disable
+        backup: true
+      notify: Redémarrer clagd
+
+    # ════════════════════════════════════════════════════════════════════
+    # 4. ROUTES STATIQUES
+    # ════════════════════════════════════════════════════════════════════
+
+    - name: "[RT] Ajouter les routes statiques persistantes"
+      template:
+        src: /dev/stdin
+        dest: /etc/network/interfaces.d/routes
+        mode: '0644'
+      vars:
+        template_content: |
+          # Routes statiques inter-VLAN (SW4)
+          {% for route in static_routes %}
+          # {{ route.description }}
+          auto route-{{ loop.index }}
+          iface route-{{ loop.index }} inet static
+            up ip route add {{ route.prefix }} dev {{ route.dev }}
+            down ip route del {{ route.prefix }} dev {{ route.dev }}
+          {% endfor %}
+      notify: Recharger la configuration réseau
+
+    # ════════════════════════════════════════════════════════════════════
+    # 5. QUAGGA / FRR — optionnel pour BGP/OSPF ────────────────────────
+    # ════════════════════════════════════════════════════════════════════
+
+    - name: "[ROUTING] Vérifier FRR installé"
+      command: which vtysh
+      register: frr_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: "[ROUTING] Installation FRR si absent"
+      apt:
+        name: frr
+        state: present
+      become: true
+      when: frr_check.rc != 0
+      ignore_errors: true
+
+    # ════════════════════════════════════════════════════════════════════
+    # 6. DÉMARRAGE DES SERVICES
+    # ════════════════════════════════════════════════════════════════════
+
+    - name: "[SVC] Activer et redémarrer networking"
+      systemd:
+        name: networking
+        enabled: true
+        state: restarted
+      notify: Attendre la stabilisation réseau
+
+    - name: "[SVC] Vérifier le statut clagd"
+      command: systemctl status clagd
+      ignore_errors: true
+      register: clagd_status
+      changed_when: false
+
+    - name: "[SVC] Afficher le statut clagd"
+      debug:
+        var: clagd_status.stdout_lines
+
+    # ════════════════════════════════════════════════════════════════════
+    # 7. VÉRIFICATIONS FINALES
+    # ════════════════════════════════════════════════════════════════════
+
+    - name: "[CHK] Vérifier les interfaces"
+      command: net show interface
+      register: ifconfig
+      changed_when: false
+      ignore_errors: true
+
+    - name: "[CHK] Afficher les interfaces"
+      debug:
+        var: ifconfig.stdout_lines
+
+    - name: "[CHK] Vérifier le statut MLAG"
+      command: net show clag
+      register: mlag_status
+      changed_when: false
+      ignore_errors: true
+
+    - name: "[CHK] Afficher le statut MLAG"
+      debug:
+        var: mlag_status.stdout_lines
+
+    - name: "[CHK] Vérifier les routes"
+      command: ip route show
+      register: routes
+      changed_when: false
+
+    - name: "[CHK] Afficher les routes"
+      debug:
+        var: routes.stdout_lines
+
+  handlers:
+
+    - name: Recharger la configuration réseau
+      command: ifreload -a
+      listen: "Recharger la configuration réseau"
+
+    - name: Redémarrer clagd
+      systemd:
+        name: clagd
+        state: restarted
+      listen: "Redémarrer clagd"
+
+    - name: Attendre la stabilisation réseau
+      pause:
+        seconds: 5
+      listen: "Attendre la stabilisation réseau"

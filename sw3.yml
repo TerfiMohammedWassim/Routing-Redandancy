@@ -1,6 +1,6 @@
 # ═══════════════════════════════════════════════════════════════════════════
 # PLAYBOOK AUTONOME — SW3 (Cumulus VX 4.x)
-# Rôle : Core switch L3 — routage inter-VLAN par routes statiques
+# Rôle : Core switch L3 MLAG primary — routage inter-VLAN + redundancy avec SW4
 # Usage : ansible-playbook -i "IP_SW3," sw3.yml -u cumulus -k --become
 # ═══════════════════════════════════════════════════════════════════════════
 ---
@@ -14,10 +14,31 @@
     hostname: sw3
     loopback_ip: "10.10.10.3/32"
 
-    # ── Uplinks depuis SW1 et SW2 ─────────────────────────────────────────
-    uplink_ports:
-      - swp1    # vers SW1 swp5
-      - swp2    # vers SW2 swp5
+    # ── Paramètres MLAG (avec SW4) ────────────────────────────────────────
+    mlag:
+      role: primary
+      sys_mac: "44:38:39:FF:03:03"       # MLAG avec SW4 — DOIT être identique
+      peerlink_name: peerlink
+      peerlink_members:
+        - swp49
+        - swp50
+      peerlink_ip: "169.254.2.1/30"
+      peer_ip: "169.254.2.2"
+      backup_ip: "10.10.10.4"            # IP de keepalive SW4
+      keepalive_ip: "10.10.10.3/32"
+
+    # ── Bonds MLAG vers SW1 et SW2 ────────────────────────────────────────
+    mlag_bonds:
+      - name: bond_sw1
+        slave: swp1
+        clag_id: 1
+        vlan: "10,20"
+        description: "MLAG vers SW1"
+      - name: bond_sw2
+        slave: swp2
+        clag_id: 2
+        vlan: "10,20"
+        description: "MLAG vers SW2"
 
     # ── Bridge ────────────────────────────────────────────────────────────
     bridge:
@@ -113,7 +134,7 @@
         content: |
           # /etc/network/interfaces — {{ hostname }}
           # Généré par Ansible — {{ lookup('pipe', 'date') }}
-          # Rôle : commutateur L3, routage inter-VLAN statique
+          # Rôle : commutateur L3 MLAG primary, routage inter-VLAN
 
           auto lo
           iface lo inet loopback
@@ -122,21 +143,63 @@
           auto eth0
           iface eth0 inet dhcp
 
-          # ── Uplinks depuis SW1 et SW2 (trunk VLAN 10,20) ────────────
-          {% for port in uplink_ports %}
-          auto {{ port }}
-          iface {{ port }}
+          # ─────────────────────────────────────────────────────
+          # PEERLINK MLAG avec SW4 (swp49, swp50)
+          # ─────────────────────────────────────────────────────
+          auto swp49
+          iface swp49
 
-          {% endfor %}
-          # ── Bridge VLAN-aware ────────────────────────────────────────
+          auto swp50
+          iface swp50
+
+          auto peerlink
+          iface peerlink inet static
+              address {{ mlag.peerlink_ip }}
+              bond-slaves swp49 swp50
+              bond-mode active-backup
+              bond-miimon 100
+              bond-use-carrier yes
+
+          auto peerlink.4094
+          iface peerlink.4094 inet static
+              address 169.254.3.1/30
+
+          # ─────────────────────────────────────────────────────
+          # MLAG Bonds vers SW1 et SW2
+          # ─────────────────────────────────────────────────────
+          auto swp1
+          iface swp1
+
+          auto swp2
+          iface swp2
+
+          auto bond_sw1
+          iface bond_sw1 inet manual
+              bond-slaves swp1
+              bond-mode active-backup
+              bond-miimon 100
+              clag-id 1
+
+          auto bond_sw2
+          iface bond_sw2 inet manual
+              bond-slaves swp2
+              bond-mode active-backup
+              bond-miimon 100
+              clag-id 2
+
+          # ─────────────────────────────────────────────────────
+          # BRIDGE VLAN-aware (peerlink + bonds MLAG)
+          # ─────────────────────────────────────────────────────
           auto {{ bridge.name }}
           iface {{ bridge.name }}
               bridge-vlan-aware yes
-              bridge-ports {{ uplink_ports | join(' ') }}
+              bridge-ports peerlink bond_sw1 bond_sw2
               bridge-vids {{ bridge.vids }}
               bridge-pvid {{ bridge.pvid }}
 
-          # ── SVIs (interfaces L3) ─────────────────────────────────────
+          # ─────────────────────────────────────────────────────
+          # SVIs (interfaces L3) pour routage inter-VLAN
+          # ─────────────────────────────────────────────────────
           {% for svi in svi_interfaces %}
           # {{ svi.description }}
           auto vlan{{ svi.vlan_id }}
@@ -147,7 +210,7 @@
 
           {% endfor %}
 
-    - name: "[NET] Recharger les interfaces"
+    - name: "[NET] Recharger as interfaces"
       command: ifreload -a
       async: 20
       changed_when: true
@@ -156,6 +219,43 @@
       wait_for:
         timeout: 3
       delegate_to: localhost
+
+    # ════════════════════════════════════════════════════════════════════
+    # 2.5 CLAGD (MLAG daemon) — configuration du keepalive
+    # ════════════════════════════════════════════════════════════════════
+
+    - name: "[CLAG] Créer le fichier /etc/cumulus/ports.conf"
+      copy:
+        dest: /etc/cumulus/ports.conf
+        content: |
+          # Cumulus Ports Configuration
+          # swp49, swp50 sont réservés pour le peerlink
+        backup: true
+
+    - name: "[CLAG] Générer /etc/network/interfaces.d/clagd - SW3"
+      copy:
+        dest: /etc/network/interfaces.d/clagd
+        content: |
+          # Ansible managed — CLAGD pour SW3
+          auto clagd
+          iface clagd
+            clagd-sys-mac {{ mlag.sys_mac }}
+            clagd-primary-ip {{ mlag.peerlink_ip }}
+            clagd-peer-ip {{ mlag.peer_ip }}
+            clagd-backup-ip {{ mlag.backup_ip }}
+            clagd-keepalive-ip {{ mlag.keepalive_ip }} peer {{ mlag.backup_ip }}
+            clagd-priority 1000
+            clagd-peer-as 65000
+            clagd-vxlan disable
+        backup: true
+      notify: Redémarrer clagd
+
+    - name: "[SVC] Démarrer le service clagd"
+      systemd:
+        name: clagd
+        enabled: true
+        state: started
+      ignore_errors: true
 
     - name: "[NET] Vérifier les SVIs"
       command: "ip addr show vlan{{ item.vlan_id }}"
@@ -233,12 +333,31 @@
           - "════════════════════════════════════════════"
           - "  SW3 configuré — RÉSUMÉ"
           - "════════════════════════════════════════════"
-          - "  Hostname       : {{ hostname }}"
-          - "  Loopback       : {{ loopback_ip }}"
-          - "  ip_forward     : 1 (routage actif)"
-          - "  Uplinks        : {{ uplink_ports | join(', ') }}"
-          - "  SVI vlan10     : 192.168.1.254/24 (GW Machine1)"
-          - "  SVI vlan20     : 192.168.2.254/24 (GW Machine2)"
-          - "  Route VLAN10   : 192.168.1.0/24 dev vlan10"
-          - "  Route VLAN20   : 192.168.2.0/24 dev vlan20"
+          - "  Hostname        : {{ hostname }}"
+          - "  Loopback        : {{ loopback_ip }}"
+          - "  ip_forward      : 1 (routage actif)"
+          - "  MLAG Role       : {{ mlag.role }}"
+          - "  MLAG Sys-MAC    : {{ mlag.sys_mac }}"
+          - "  Peerlink (SW4)  : {{ mlag.peerlink_ip }} ↔ {{ mlag.peer_ip }}"
+          - "  Bond SW1 (swp1) : clag-id 1, VLAN 10,20"
+          - "  Bond SW2 (swp2) : clag-id 2, VLAN 10,20"
+          - "  SVI vlan10      : 192.168.1.254/24 (GW Machine1)"
+          - "  SVI vlan20      : 192.168.2.254/24 (GW Machine2)"
           - "════════════════════════════════════════════"
+
+  handlers:
+
+    - name: Recharger la configuration réseau
+      command: ifreload -a
+      listen: "Recharger la configuration réseau"
+
+    - name: Redémarrer clagd
+      systemd:
+        name: clagd
+        state: restarted
+      listen: "Redémarrer clagd"
+
+    - name: Attendre la stabilisation réseau
+      pause:
+        seconds: 5
+      listen: "Attendre la stabilisation réseau"

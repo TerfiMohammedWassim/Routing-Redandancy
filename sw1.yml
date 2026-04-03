@@ -39,8 +39,10 @@
         clag_id: 2
         vlan: 20
 
-    # ── Uplink vers SW3 ───────────────────────────────────────────────────
-    uplink_port: swp5
+    # ── Uplink vers SW3 et SW4 (core redundancy) ──────────────────────────
+    uplink_ports:
+      - swp5    # vers SW3 (MLAG bond clag-id 1)
+      - swp6    # vers SW4 (MLAG bond clag-id 1)
 
     # ── Bridge ────────────────────────────────────────────────────────────
     bridge:
@@ -145,10 +147,12 @@
               clagd-sys-mac {{ mlag.sys_mac }}
               address {{ mlag.peerlink_ip }}
 
-          # ── Uplink vers SW3 ──────────────────────────────────────────
-          auto {{ uplink_port }}
-          iface {{ uplink_port }}
+          # ── Uplinks vers SW3 et SW4 (core redundancy) ────────────────────
+          {% for port in uplink_ports %}
+          auto {{ port }}
+          iface {{ port }}
 
+          {% endfor %}
           # ── Bonds MLAG ───────────────────────────────────────────────
           {% for bond in mlag_bonds %}
           auto {{ bond.name }}
@@ -166,7 +170,7 @@
           auto {{ bridge.name }}
           iface {{ bridge.name }}
               bridge-vlan-aware yes
-              bridge-ports {{ mlag_bonds | map(attribute='name') | join(' ') }} {{ mlag.peerlink_name }} {{ uplink_port }}
+              bridge-ports {{ mlag_bonds | map(attribute='name') | join(' ') }} {{ mlag.peerlink_name }} {{ uplink_ports | join(' ') }}
               bridge-vids {{ bridge.vids }}
               bridge-pvid {{ bridge.pvid }}
               post-up bridge vlan add dev {{ bridge.name }} vid 10 self
